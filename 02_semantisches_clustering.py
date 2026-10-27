@@ -90,19 +90,40 @@ VARIANTS = {
 }
 MAIN_VARIANT = "B_CHANCEN_HERAUSF"
 
+##########################
+# Sprachmodell Parameter #
+##########################
+# Festlegen des Embedding Modells
 MODEL_NAME = "Alibaba-NLP/gte-multilingual-base"
+# Festlegen des Deutsches spaCy-Sprachmodell zur Erkennung von Satzgrenzen.
 SPACY_MODEL = "de_core_news_sm"
+# Legt Zufallswert für reproduzierbare Ergebnisse fest → heikel
 RANDOM_SEED = 42
+# Dokmentiert, dass Texte nicht automatisch abgeschnitten werden sollen
 ALLOW_TRUNCATION = False
 
+##################
+# UMAP-Parameter #
+##################
+# Anzahl Nachbaren die UMAP zur Erfassung der lokalen Struktur berücksichtigt → Fokus auf lokal vs global
 UMAP_N_NEIGHBORS = 15
+# Anzahl Dimensionen nach der Reduktion
 UMAP_N_COMPONENTS = 5
+# Mindestabstand, den UMAP bei der Einbettung ähnlichen Punkte anstrebt → je tiefer desto kompaktere Anordnung ähnlicher Punkte
 UMAP_MIN_DIST = 0.0
+# Verwendetes Distanzmass für die ursprünlichen Embeddings
 UMAP_METRIC = "cosine"
 
+#####################
+# HDBSCAN Parameter #
+#####################
+# Mindestgrösse eines Clusters → Untergrenze an Anzahl Embeddings
 HDBSCAN_MIN_CLUSTER_SIZE = 15
+# Parameter für die Dichteschätzung (tiefere Werte = Mehr Punkte können Clustern zugeordnet werden)
 HDBSCAN_MIN_SAMPLES = 2
+# Verwendetes Distanzmass für HDBSCAN
 HDBSCAN_METRIC = "euclidean"
+# Verwendete Methode zur Auswahl stabiler Cluster
 HDBSCAN_CLUSTER_SELECTION_METHOD = "eom"
 
 LINKAGE_METHOD = "average"
