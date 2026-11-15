@@ -15,7 +15,7 @@ from openpyxl.utils import get_column_letter
 # ============================================================
 
 # Hauptordner liegt im gleichen Verzeichnis wie dieses Script
-HAUPTORDNER = Path(__file__).parent / "texte"
+HAUPTORDNER = Path(__file__).parent / "C:/Users/TobiasSchlegel/Desktop/texte"
 
 # Speicherort der Excel-Datei
 EXCEL_DATEI = HAUPTORDNER / "Word_Auswertung.xlsx"
@@ -48,10 +48,17 @@ METADATEN = {
 ABSCHNITTE = {
         "Definition": [
         "Definition",
-        "Definition (600 Zeichen inkl. Leerzeichen)"
+        "Definition (600 Zeichen inkl. Leerzeichen)",
+        "Definition (600 Zeichen)"
     ],
-    "Anwendungen": "Heutige und zukünftige Anwendungen sowie Chancen",
-    "Herausforderungen": "Technische Herausforderungen sowie regulatorische und gesellschaftliche Hemmnisse"
+    "Anwendungen": [
+        "Heutige und zukünftige Anwendungen sowie Chancen",
+        "Heutige und zukünftige Anwendungen sowie Chancen (1700 Zeichen)"
+    ],
+    "Herausforderungen": [
+        "Technische Herausforderungen sowie regulatorische und gesellschaftliche Hemmnisse",
+        "Technische Herausforderungen sowie regulatorische und gesellschaftliche Hemmnisse (1300 Zeichen)"
+    ]
 }
 
 # ============================================================
@@ -215,16 +222,18 @@ def dokument_auslesen(dateipfad):
     # --------------------------------------------------------
     # A. TITEL FINDEN
     # --------------------------------------------------------
-
+    # TITEL AUSLESEN
     for p in absätze:
+        text = text_ohne_formatierung(p).strip()
 
-        if p.style and normalisieren(p.style.name) in [
-            "title", "titel"
-        ]:
+        # Leere Absätze am Anfang überspringen
+        if not text:
+            continue
 
-            ergebnis["Titel"] = text_ohne_formatierung(p)
-            break
-
+        # Ersten Textabsatz als Titel übernehmen
+        # Unabhängig von Fett- oder Titel-Formatierung
+        ergebnis["Titel"] = text
+        break
     # --------------------------------------------------------
     # B. METADATEN FINDEN
     # --------------------------------------------------------
@@ -259,7 +268,7 @@ def dokument_auslesen(dateipfad):
     # --------------------------------------------------------
     # C. LEAD FINDEN
     # --------------------------------------------------------
-    # LEAD AUSLESEN
+
     lead_aktiv = False
     lead_gefunden = False
     lead_texte = []
@@ -270,31 +279,52 @@ def dokument_auslesen(dateipfad):
         if not text:
             continue
 
+        # Formatierung der Textteile prüfen
+        runs_mit_text = [
+            run for run in p.runs
+            if run.text.strip()
+        ]
+
+        ist_kursiv = (
+                runs_mit_text
+                and all(run.italic for run in runs_mit_text)
+        )
+
+        ist_fett = (
+                runs_mit_text
+                and all(run.bold for run in runs_mit_text)
+        )
+
         # Variante 1 und 2: Teaser-Zwischentitel erkennen
-        if normalisieren(text) in [
+        if normalisieren(text).strip() in [
             "teaser",
-            "Teaser (400 Zeichen inkl. Leerzeichen)"
+            "teaser (400 zeichen inkl. leerzeichen)"
         ]:
             lead_aktiv = True
             lead_gefunden = True
             continue
 
         # Wenn ein Teaser begonnen hat:
-        # Text bis zum nächsten fett formatierten Zwischentitel sammeln
         if lead_aktiv:
+
+            # Fett-kursive Absätze gehören zum Lead!
+            if ist_fett and ist_kursiv:
+                lead_texte.append(text)
+                continue
+
+            # Andere fett formatierte Absätze beenden den Lead
             if absatz_ist_fett(p):
                 lead_aktiv = False
                 continue
 
             lead_texte.append(text)
 
-        # Variante 3: Kursiver Text ohne Zwischentitel
-        elif not lead_gefunden and absatz_ist_kursiv(p):
+        # Variante 3: Kursiver oder fett-kursiver Text ohne Zwischentitel
+        elif not lead_gefunden and ist_kursiv:
             lead_texte.append(text)
 
     if lead_texte:
         ergebnis["Lead"] = "\n".join(lead_texte)
-
     # --------------------------------------------------------
     # D. DEFINITION, ANWENDUNGEN, HERAUSFORDERUNGEN
     # --------------------------------------------------------
@@ -312,26 +342,21 @@ def dokument_auslesen(dateipfad):
         if text == ergebnis["Titel"]:
             continue
 
-        # Metadaten-Absätze überspringen
-        if any(
-            normalisieren(text).startswith(normalisieren(feld))
-            for feld in METADATEN
-        ):
+        # Prüfen, ob der Absatz exakt einem der drei
+        # festgelegten Hauptabschnittstitel entspricht
+        gefundene_kategorie = abschnitt_zuordnen(text)
+
+        if gefundene_kategorie:
+            aktuelle_kategorie = gefundene_kategorie
             continue
 
-        # Fett formatierte Absätze als mögliche Abschnittstitel
-        if absatz_ist_fett(p):
-
-            aktuelle_kategorie = abschnitt_zuordnen(text)
-
-            continue
-
-        # Fliesstext dem aktuellen Abschnitt zuordnen
+        # Jeden anderen Absatz dem aktuellen Abschnitt zuordnen
+        # Formatierung spielt dabei keine Rolle!
         if aktuelle_kategorie:
+            if ergebnis[aktuelle_kategorie]:
+                ergebnis[aktuelle_kategorie] += "\n"
 
-            ergebnis[aktuelle_kategorie] += (
-                "\n" + text
-            ).strip()
+            ergebnis[aktuelle_kategorie] += text
 
     return ergebnis
 
