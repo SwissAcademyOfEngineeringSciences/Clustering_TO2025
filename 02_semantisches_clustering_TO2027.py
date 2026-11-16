@@ -59,13 +59,11 @@ import spacy
 from sentence_transformers import SentenceTransformer
 import umap
 import hdbscan
-import torch
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 from scipy.spatial.distance import squareform
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
-from pathlib import Path
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -74,12 +72,12 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # =====================================================================
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = BASE_DIR / "results_2027"
-INPUT_CSV = Path("technologies_2027.csv")
+INPUT_CSV = BASE_DIR / "Technologien_2027_alle.csv"
 OUT = RESULTS_DIR / "02_semantisches_clustering"
 OUT.mkdir(parents=True, exist_ok=True)
 
 FIELD_DEFINITION = "Definition"
-FIELD_CHANCEN = "Heutige und zukünftige Anwendungen sowie Chancen"
+FIELD_CHANCEN = "Heutige und zukünftige Anwendungen und Chancen"
 FIELD_HERAUSF = "Technische Herausforderungen sowie regulatorische und gesellschaftliche Hemmnisse"
 ALL_FIELDS = [FIELD_DEFINITION, FIELD_CHANCEN, FIELD_HERAUSF]
 
@@ -90,7 +88,7 @@ VARIANTS = {
     "D_HERAUSFORDERUNGEN": [FIELD_HERAUSF],
     "E_DEFINITION": [FIELD_DEFINITION],
 }
-MAIN_VARIANT = "B_CHANCEN_HERAUSF"
+MAIN_VARIANT = "B_CHANCEN_HERAUSF" # alternativ "A_CORE"
 
 ##########################
 # Sprachmodell Parameter #
@@ -120,22 +118,27 @@ UMAP_METRIC = "cosine"
 # HDBSCAN Parameter #
 #####################
 # Mindestgrösse eines Clusters → Untergrenze an Anzahl Embeddings
-HDBSCAN_MIN_CLUSTER_SIZE = 15
+HDBSCAN_MIN_CLUSTER_SIZE = 10 # bisher 15
 # Parameter für die Dichteschätzung (tiefere Werte = Mehr Punkte können Clustern zugeordnet werden)
 HDBSCAN_MIN_SAMPLES = 2
 # Verwendetes Distanzmass für HDBSCAN
 HDBSCAN_METRIC = "euclidean"
 # Verwendete Methode zur Auswahl stabiler Cluster
-HDBSCAN_CLUSTER_SELECTION_METHOD = "eom"
+HDBSCAN_CLUSTER_SELECTION_METHOD = "leaf"
 
 LINKAGE_METHOD = "average"
-K_VALUES = list(range(4, 11))
-TARGET_K = 9
+K_VALUES = list(range(4, 16)) # bisher list(range(4, 11))
+TARGET_K = 7 # bisher 9, ergibt sich aber aus der Analyse verschiedener Cluster
 
 BAR_COLOR = "#02AFA9"
 DPI = 220
 CSV_SEP = ";"
 CSV_ENCODING = "utf-8-sig"
+
+# True: Nur Segmente und Qualitätsbericht erzeugen, ohne Embedding-Modell/Clustering.
+SEGMENTATION_PREVIEW_ONLY = False
+# Lange Listeneinträge werden weiterhin in Sätze zerlegt.
+SPLIT_LONG_ENTRIES = True
 
 # =====================================================================
 # 1. HILFSFUNKTIONEN
@@ -166,10 +169,80 @@ def token_count(tokenizer, text):
     return len(tokenizer.encode(text, add_special_tokens=True, truncation=False))
 
 
-def build_segments(df, nlp, model):
-    tokenizer = model.tokenizer
-    max_len = get_max_seq_length(model)
-    rows = []
+# Strukturelle Gliederung vor der spaCy-Satzsegmentierung.
+BULLET_PREFIX_RE = re.compile(r"^\s*(?:[•●▪◦‣]\s*|[-–]\s+)")
+HEADING_RE = re.compile(r"^([^\n:]{2,110}):\s*(.*)$", flags=re.DOTALL)
+TERMINAL_RE = re.compile(r"[.!?][\"'»”)]*\s*$")
+
+
+def structured_units(text):
+    """Erhält die Reihenfolge der Textzeilen; nur Leerraum/Bullet-Marker werden bereinigt.
+
+    Eine Doppelpunkt-Zeile ohne Inhalt wird als Kontext gespeichert. Eine
+    vollständige Überschrift mit Inhalt bleibt zusammen. Kein Text wird
+    stillschweigend verworfen: Kontextzeilen erscheinen im Audit-Export.
+    """
+    lines = []
+    for number, original in enumerate(text.splitlines(), 1):
+        cleaned = BULLET_PREFIX_RE.sub("", original.strip()).strip()
+        if cleaned:
+            lines.append((number, cleaned))
+    units = []
+    pending = []
+    for line_number, line in lines:
+        # Einleitende Zeilen mit Doppelpunkt: Kontext statt eigenständiges Embedding.
+        if line.endswith(":"):
+            pending.append((line_number, line))
+            continue
+        # Eine alleinstehende Überschrift wird mit dem folgenden Inhalt verbunden,
+        # falls sie wie eine kurze thematische Bezeichnung aussieht.
+        if pending:
+            last_num, last = pending[-1]
+            if len(last.split()) <= 6 and len(pending) == 1:
+                line = last + " " + line
+                pending = []
+        units.append({"line": line_number, "text": line,
+                      "context": " ".join(x[1] for x in pending),
+                      "context_lines": [x[0] for x in pending]})
+        pending = []
+    # Nicht zugeordnete Schlusszeilen bleiben sichtbar und werden nicht gelöscht.
+    if pending:
+        units.append({"line": pending[-1][0],
+                      "text": " ".join(x[1] for x in pending),
+                      "context": "", "context_lines": [], "dangling_heading": True})
+    return units
+
+
+def split_unit_into_sentences(nlp, text):
+    """Satzgrenzen nur innerhalb einer strukturellen Einheit verwenden.
+
+    Grammatikalische Fragmente (z.B. nach Semikolon) werden mit dem nächsten
+    Satzteil verbunden. Das reduziert isolierte Überschriften und Halbsätze.
+    """
+    if not SPLIT_LONG_ENTRIES:
+        return [text]
+    spans = [s.text.strip() for s in nlp(text).sents if s.text.strip()]
+    if not spans:
+        return [text]
+    result = []
+    buffer = ""
+    for part in spans:
+        buffer = (buffer + " " + part).strip() if buffer else part
+        if TERMINAL_RE.search(buffer):
+            result.append(buffer)
+            buffer = ""
+    if buffer:
+        if result and not TERMINAL_RE.search(buffer):
+            result[-1] += " " + buffer
+        else:
+            result.append(buffer)
+    return result
+
+
+def build_segments(df, nlp, model=None):
+    tokenizer = model.tokenizer if model is not None else None
+    max_len = get_max_seq_length(model) if model is not None else None
+    rows, audit_rows = [], []
     seg_id = 0
     for row_idx, row in df.iterrows():
         technology = nfc(row["Technologie"])
@@ -177,40 +250,93 @@ def build_segments(df, nlp, model):
             text = nfc(row[field])
             if not text:
                 continue
-            doc = nlp(text)
+            units = structured_units(text)
             sentence_no = 0
-            for sent in doc.sents:
-                raw = nfc(sent.text)
-                if not raw:
-                    continue
-                sentence_no += 1
-                seg_id += 1
-                tc = token_count(tokenizer, raw)
-                rows.append({
-                    "segment_id": f"S{seg_id:05d}",
-                    "technology": technology,
-                    "source_row": row_idx,
-                    "field": field,
-                    "sentence_no": sentence_no,
-                    "n_chars": len(raw),
-                    "n_words": len(re.findall(r"\b\w+\b", raw, flags=re.UNICODE)),
-                    "n_model_tokens": tc,
-                    "model_max_seq_length": max_len,
-                    "exceeds_model_limit": tc > max_len,
-                    "segment_text": raw,
-                })
+            for unit_no, unit in enumerate(units, 1):
+                parts = split_unit_into_sentences(nlp, unit["text"])
+                for part_no, raw in enumerate(parts, 1):
+                    raw = nfc(raw)
+                    if not raw:
+                        continue
+                    sentence_no += 1
+                    seg_id += 1
+                    tc = token_count(tokenizer, raw) if tokenizer else pd.NA
+                    rows.append({
+                        "segment_id": f"S{seg_id:05d}",
+                        "technology": technology,
+                        "source_row": row_idx,
+                        "field": field,
+                        "sentence_no": sentence_no,
+                        "source_line": unit["line"],
+                        "source_unit": unit_no,
+                        "part_in_unit": part_no,
+                        "context_text": unit["context"],
+                        "context_source_lines": ",".join(map(str, unit["context_lines"])),
+                        "dangling_heading": bool(unit.get("dangling_heading", False)),
+                        "n_chars": len(raw),
+                        "n_words": len(re.findall(r"\b\w+\b", raw, flags=re.UNICODE)),
+                        "n_model_tokens": tc,
+                        "model_max_seq_length": max_len,
+                        "exceeds_model_limit": tc > max_len if tokenizer else False,
+                        "segment_text": raw,
+                    })
+                audit_rows.append({"technology": technology, "source_row": row_idx,
+                                   "field": field, "source_unit": unit_no,
+                                   "source_line": unit["line"],
+                                   "source_unit_text": unit["text"],
+                                   "context_text": unit["context"],
+                                   "n_output_segments": len(parts)})
     out = pd.DataFrame(rows)
+    audit = pd.DataFrame(audit_rows)
     if out.empty:
         raise RuntimeError("Keine Segmente gefunden.")
-    too_long = out[out["exceeds_model_limit"]]
-    if len(too_long):
-        raise RuntimeError(
-            f"ABBRUCH: {len(too_long)} Segment(e) über Modelllimit {max_len}. "
-            "Es wird nicht trunciert oder automatisch geteilt.\n" +
-            too_long[["segment_id","technology","field","n_model_tokens"]]
-            .head(20).to_string(index=False)
-        )
-    return out
+    if tokenizer:
+        too_long = out[out["exceeds_model_limit"]]
+        if len(too_long):
+            raise RuntimeError(
+                f"ABBRUCH: {len(too_long)} Segment(e) über Modelllimit {max_len}. "
+                "Es wird nicht trunciert oder automatisch geteilt.\n" +
+                too_long[["segment_id", "technology", "field", "n_model_tokens"]]
+                .head(20).to_string(index=False)
+            )
+    return out, audit
+
+
+def save_segmentation_diagnostics(segments, audit):
+    audit.to_csv(OUT / "01b_segmentierung_quellzeilen_audit.csv",
+                 index=False, sep=CSV_SEP, encoding=CSV_ENCODING)
+    flags = segments.copy()
+    flags["flag_short"] = flags["n_words"] <= 5
+    flags["flag_colon_end"] = flags["segment_text"].str.endswith(":")
+    flags["flag_no_terminal"] = ~flags["segment_text"].str.contains(
+        r"[.!?][\"'»”)]*\s*$", regex=True)
+    flags["flag_linebreak"] = flags["segment_text"].str.contains("\n", regex=False)
+    flags["flag_dangling_heading"] = flags["dangling_heading"]
+    flagged = flags.loc[flags[["flag_short", "flag_colon_end", "flag_no_terminal",
+                                "flag_linebreak", "flag_dangling_heading"]].any(axis=1)]
+    flagged.to_csv(OUT / "01c_segmentierung_prueffalle.csv",
+                   index=False, sep=CSV_SEP, encoding=CSV_ENCODING)
+    report = {
+        "n_segments": int(len(segments)),
+        "n_technologies": int(segments["technology"].nunique()),
+        "n_source_units": int(len(audit)),
+        "n_short_le_5_words": int(flags["flag_short"].sum()),
+        "n_colon_end": int(flags["flag_colon_end"].sum()),
+        "n_no_terminal_punctuation": int(flags["flag_no_terminal"].sum()),
+        "n_dangling_heading": int(flags["flag_dangling_heading"].sum()),
+        "n_context_attached": int(segments["context_text"].astype(bool).sum()),
+        "median_words": float(segments["n_words"].median()),
+        "mean_words": float(segments["n_words"].mean()),
+        "notes": [
+            "Text wird zeilenweise strukturiert und danach satzweise segmentiert.",
+            "Einleitungen mit Doppelpunkt bleiben als context_text im Export erhalten; "
+            "sie werden nicht in das Embedding aufgenommen.",
+            "Prueffall-Flags sind Hinweise, keine automatischen Ausschlusskriterien.",
+        ],
+    }
+    (OUT / "01d_segmentierung_qualitaetsbericht.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("Segmentierungsdiagnostik:", report)
 
 
 def normalized_entropy(counts):
@@ -361,7 +487,7 @@ missing = [c for c in required if c not in df.columns]
 if missing:
     raise ValueError(f"Fehlende Spalten: {missing}")
 
-print("[2/8] Lade spaCy und SentenceTransformer ...")
+print("[2/8] Lade spaCy fuer die Satzsegmentierung ...")
 try:
     nlp = spacy.load(SPACY_MODEL, disable=["ner"])
 except OSError as e:
@@ -370,21 +496,29 @@ except OSError as e:
         f"Installieren: python -m spacy download {SPACY_MODEL}"
     ) from e
 nlp.max_length = max(nlp.max_length, 3_000_000)
-model = SentenceTransformer(
-    MODEL_NAME,
-    trust_remote_code=True,
-    device="cpu"
-)
-max_seq_length = get_max_seq_length(model)
 
-print("[3/8] Segmentiere alle drei Textfelder und prüfe Tokenlimits ...")
-segments = build_segments(df, nlp, model)
+print("[3/8] Segmentiere strukturiert und erstelle Qualitaetsdiagnostik ...")
+if SEGMENTATION_PREVIEW_ONLY:
+    segments, source_audit = build_segments(df, nlp, model=None)
+    segments.to_csv(OUT / "01_alle_segmente.csv",
+                    index=False, sep=CSV_SEP, encoding=CSV_ENCODING)
+    field_counts = segments.groupby("field").size().rename("n_segments").reset_index()
+    field_counts.to_csv(OUT / "02_segmentanzahl_nach_textfeld.csv",
+                        index=False, sep=CSV_SEP, encoding=CSV_ENCODING)
+    save_segmentation_diagnostics(segments, source_audit)
+    print("VORSCHAU FERTIG: Keine Embeddings oder Cluster berechnet.")
+    raise SystemExit(0)
+
+print("Lade SentenceTransformer fuer den vollstaendigen Lauf ...")
+model = SentenceTransformer(MODEL_NAME, trust_remote_code=True, device="cpu")
+max_seq_length = get_max_seq_length(model)
+segments, source_audit = build_segments(df, nlp, model=model)
 segments.to_csv(OUT / "01_alle_segmente.csv",
                 index=False, sep=CSV_SEP, encoding=CSV_ENCODING)
-
 field_counts = segments.groupby("field").size().rename("n_segments").reset_index()
 field_counts.to_csv(OUT / "02_segmentanzahl_nach_textfeld.csv",
                     index=False, sep=CSV_SEP, encoding=CSV_ENCODING)
+save_segmentation_diagnostics(segments, source_audit)
 
 print("[4/8] Berechne Segment-Embeddings einmalig ...")
 embeddings = model.encode(
@@ -626,7 +760,10 @@ params = {
     "model_max_seq_length": max_seq_length,
     "random_seed": RANDOM_SEED,
     "segmentation": {
-        "unit": "spaCy sentence",
+        "unit": "line-structured spaCy sentence",
+        "structural_line_first": True,
+        "colon_intro_preserved_as_context_metadata": True,
+        "split_long_entries": SPLIT_LONG_ENTRIES,
         "fields_segmented": ALL_FIELDS,
         "automatic_split": False,
         "truncation_allowed": ALLOW_TRUNCATION,

@@ -53,7 +53,7 @@ CLUSTER_DIR = RESULTS_DIR / "02_semantisches_clustering" / "hauptanalyse"
 OUT = RESULTS_DIR / "03_lexikalische_analyse"
 OUT.mkdir(parents=True, exist_ok=True)
 
-TARGET_K = 9
+TARGET_K = 7 # bisher 9, ergibt sich aber aus der Analyse verschiedener Cluster
 SPACY_MODEL = "de_core_news_sm"
 LEXICAL_POS = {"NOUN", "PROPN", "ADJ"}
 USE_LEMMATIZATION = True

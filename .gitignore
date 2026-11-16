@@ -6,6 +6,9 @@ venv/
 __pycache__/
 *.py[cod]
 
+# Exeldaten
+*.xlsx
+
 # PyCharm
 .idea/
 
@@ -13,6 +16,7 @@ __pycache__/
 results/
 results_2027/
 texte/
+veraltet/
 
 # OS files
 .DS_Store
