@@ -58,9 +58,9 @@ SPACY_MODEL = "de_core_news_sm"
 LEXICAL_POS = {"NOUN", "PROPN", "ADJ"}
 USE_LEMMATIZATION = True
 MAX_DF = 0.60
-TOP_N_TERMS = 20
-TOP_N_BAR = 10
-TOP_N_WORDCLOUD = 20
+TOP_N_TERMS = 40
+TOP_N_BAR = 40
+TOP_N_WORDCLOUD = 30
 TOP_N_REPRESENTATIVE_SEGMENTS = 12
 
 BAR_COLOR = "#02AFA9"
@@ -461,9 +461,9 @@ def combined_plot(cluster_list, nrows, ncols, filename):
     fig.savefig(plot_dir / filename, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
 
-combined_plot(macros[:6], 3, 2, "combined_M0_M5_topterms.png")
-if len(macros) > 6:
-    combined_plot(macros[6:9], 2, 2, "combined_M6_M8_topterms.png")
+combined_plot(macros[:4], 2, 2, "combined_M0_M5_topterms.png")
+if len(macros) > 4:
+    combined_plot(macros[4:8], 2, 2, "combined_M6_M8_topterms.png")
 
 # =====================================================================
 # 7. COVERAGE- UND THEMENPROFIL-DIAGNOSTIK
